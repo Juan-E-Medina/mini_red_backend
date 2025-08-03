@@ -1,87 +1,91 @@
 const bcrypt = require('bcrypt')
 const usersRouter = require('express').Router()
 const User = require('../models/user')
-const checkAdmin = require('../middleware/checkAdmin')
 const userExtractor = require('../middleware/userExtractor')
+const checkAdmin = require('../middleware/checkAdmin')
 
-// Crear nuevo usuario (solo admin)
-usersRouter.post('/', userExtractor, checkAdmin, async (request, response) => {
-  const { username, name, password, role } = request.body
+// Obtener todos los usuarios (para vista general)
+usersRouter.get('/', async (req, res) => {
+  const users = await User.find({})
+    .populate({
+      path: 'blogs',
+      options: { sort: { likes: -1 } }
+    })
+
+  res.json(users)
+})
+
+// Crear usuario (solo admin)
+usersRouter.post('/', userExtractor, checkAdmin, async (req, res) => {
+  const { username, name, password, role } = req.body
 
   if (!password || password.length < 3) {
-    return response.status(400).json({ error: 'La contraseña debe tener al menos 3 caracteres.' })
+    return res.status(400).json({ error: 'La contraseña debe tener al menos 3 caracteres' })
   }
 
-  const existingUsername = await User.findOne({ username })
-  if (existingUsername) {
-    return response.status(400).json({ error: 'El username ya está registrado.' })
+  const usernameExists = await User.findOne({ username })
+  const nameExists = await User.findOne({ name })
+
+  if (usernameExists) {
+    return res.status(400).json({ error: 'El username ya está en uso' })
+  }
+  if (nameExists) {
+    return res.status(400).json({ error: 'El nombre ya está en uso' })
   }
 
-  const existingName = await User.findOne({ name })
-  if (existingName) {
-    return response.status(400).json({ error: 'El name ya está registrado.' })
-  }
-
-  const saltRounds = 10
-  const passwordHash = await bcrypt.hash(password, saltRounds)
+  const passwordHash = await bcrypt.hash(password, 10)
 
   const user = new User({
     username,
     name,
     passwordHash,
-    role: role === 'admin' ? 'admin' : 'user'
+    role: role === 'admin' ? 'admin' : 'user',
+    ratings: [],
+    averageRating: 0,
+    category: 'baja'
   })
 
   const savedUser = await user.save()
-  response.status(201).json(savedUser)
+  res.status(201).json(savedUser)
 })
 
-// Calificar a un usuario
-usersRouter.put('/:id/rate', userExtractor, async (request, response) => {
-  const { rating } = request.body
-  const ratedUserId = request.params.id
-  const raterUserId = request.user.id
+// Calificar usuario (user califica a otro)
+usersRouter.put('/:id/rate', userExtractor, async (req, res) => {
+  const ratedUserId = req.params.id
+  const raterUser = req.user
+  const { score } = req.body
 
-  if (rating < 1 || rating > 5) {
-    return response.status(400).json({ error: 'La calificación debe estar entre 1 y 5.' })
+  if (!score || score < 1 || score > 5) {
+    return res.status(400).json({ error: 'La calificación debe estar entre 1 y 5' })
   }
 
-  const ratedUser = await User.findById(ratedUserId)
-  if (!ratedUser) {
-    return response.status(404).json({ error: 'Usuario no encontrado.' })
+  if (ratedUserId === raterUser.id.toString()) {
+    return res.status(400).json({ error: 'No puedes calificarte a ti mismo' })
   }
 
-  if (ratedUserId === raterUserId) {
-    return response.status(400).json({ error: 'No puedes calificarte a ti mismo.' })
+  const userToRate = await User.findById(ratedUserId)
+  if (!userToRate) {
+    return res.status(404).json({ error: 'Usuario no encontrado' })
   }
 
-  // Buscar si ya existe una calificación
-  const existingRatingIndex = ratedUser.ratingsReceived.findIndex(
-    (entry) => entry.fromUser.toString() === raterUserId
-  )
+  // Ver si ya lo ha calificado
+  const existingRating = userToRate.ratings.find(r => r.rater.toString() === raterUser.id)
 
-  if (existingRatingIndex !== -1) {
-    ratedUser.ratingsReceived[existingRatingIndex].rating = rating
+  if (existingRating) {
+    existingRating.score = score // Editar puntuación
   } else {
-    ratedUser.ratingsReceived.push({
-      fromUser: raterUserId,
-      rating
-    })
+    userToRate.ratings.push({ rater: raterUser.id, score })
   }
 
-  // Calcular promedio
-  const ratings = ratedUser.ratingsReceived.map(entry => entry.rating)
-  const average = ratings.reduce((a, b) => a + b, 0) / ratings.length
-  ratedUser.averageRating = Number(average.toFixed(2))
+  // Recalcular promedio y categoría
+  const total = userToRate.ratings.reduce((sum, r) => sum + r.score, 0)
+  const avg = total / userToRate.ratings.length
+  userToRate.averageRating = avg.toFixed(2)
 
-  // Asignar categoría
-  if (average >= 4.0) ratedUser.category = 'Alta'
-  else if (average >= 2.5) ratedUser.category = 'Media'
-  else ratedUser.category = 'Baja'
+  if (avg >= 4.0) userToRate.category = 'alta'
+  else if (avg >= 2.5) userToRate.category = 'media'
+  else userToRate.category = 'baja'
 
-  const updatedUser = await ratedUser.save()
-  response.json(updatedUser)
+  await userToRate.save()
+  res.json({ message: 'Calificación actualizada', average: userToRate.averageRating, category: userToRate.category })
 })
-
-module.exports = usersRouter
-
